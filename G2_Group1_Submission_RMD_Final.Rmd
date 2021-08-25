@@ -1,0 +1,526 @@
+---
+title: "OPIM326 Project"
+author: "G2 Group 1"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+geometry: margin=2.5cm
+output:
+  pdf_document:
+    toc: yes
+    number_sections: true
+    df_print: paged
+    fig_caption: yes
+  html_document:
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+    fig_caption: yes
+    self_contained: yes
+    theme: readable
+    toc: yes
+header-includes:
+ \usepackage{float}
+ \floatplacement{figure}{H}
+---
+\newpage
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=FALSE
+                    )
+options(tinytex.verbose = TRUE)
+```
+
+# Problem Overview # 
+We decided to embark on an Exploratory Data Analysis project using the dataset and background info provided by [Recruit Restaurant Visitor Forecasting](https://www.kaggle.com/c/recruit-restaurant-visitor-forecasting). We scoped the project according to the following problem statements: 
+
+1. To understand the significant factors that affect the number of customers/day using visualization techniques (**Descriptive Analytics**)
+
+2. To estimate the number of customers/day by accounting for factors such  as location, cuisine, reservations, time period and weather data (**Predictive Analytics**)
+
+3. To discover heuristic guidelines to aid new restaurant owners in decision making 
+
+This report will be useful for individuals who seek to understand more about the analytics methodology used to analyse the Japan F&B industry. Specifically, we have narrowed down two group of user profiles who might extract significant value from this report: 
+
+1) Operations Manager operating a large restaurant chain with many outlets across Japan, who wants to know more about the demand factors that affect daily visitor flow, so much so that he is well informed to plan ahead in terms of supply planning or new outlet planning
+
+2) Aspiring Entrepreneur who wish to understand more about the Japan F&B industry landscape so that he can make better decisions in terms of the key consideration factors (cuisine genre, location, store size, reservation policy etc.)
+
+## Data Set ## 
+The [data](https://www.kaggle.com/c/recruit-restaurant-visitor-forecasting/data) comes in the shape of 8 relational files which are derived from two separate Japanese websites that collect user information: "Hot Pepper Gourmet (hpg): similar to Yelp" (search and reserve) and "AirREGI / Restaurant Board (air): similar to Square" (reservation control and cash register). The training data is based on the time range of Jan 2016 - most of Apr 2017, while the test set includes the last week of Apr plus May 2017. 
+
+These are the individual files:
+
+- **air_visit_data.csv**: historical visit data for the *air* restaurants. This is essentially the main training data set.
+
+- **air_reserve.csv** / **hpg_reserve.csv**: reservations made through the *air* / *hpg* systems.
+
+- **air_store_info.csv** / **hpg_store_info.csv**: details about the *air* / *hpg* restaurants including genre and location.
+
+- **store_id_relation.csv**: connects the *air* and *hpg* ids
+
+- **date_info.csv**: essentially flags the Japanese holidays.
+
+
+To better illustrate the effectiveness of our forecasting techniques, we will be using **air_visit_data.csv** data from Jan 2016 - Mar 2017 as training set and Mar - Apr 2017 as test set. The rest of the csv files will be used to for feature engineering. 
+
+```{r, message=FALSE}
+# general visualisation
+library('ggplot2') # visualisation
+library('scales') # visualisation
+library('grid') # visualisation
+library('gridExtra') # visualisation
+library('corrplot') # visualisation
+library('knitr')
+
+# general data manipulation
+library('tidyverse') # data manipulation
+library('dplyr') # data manipulation
+library('readr') # input/output
+library('data.table') # data manipulation
+library('tibble') # data wrangling
+library('tidyr') # data wrangling
+library('stringr') # string manipulation
+library('forcats') # factor manipulation
+
+# specific visualisation
+library('ggrepel') # visualisation
+library('ggridges') # visualisation
+library('ggExtra') # visualisation
+library('ggforce') # visualisation
+library('viridis') # visualisation
+
+# specific data manipulation
+library('lazyeval') # data wrangling
+library('broom') # data wrangling
+library('purrr') # string manipulation
+
+# Date plus forecast
+library('lubridate') # date and time
+library('timeDate') # date and time
+library('tseries') # time series analysis
+library('timetk') # time series analysis
+
+# Model building & cross-validation 
+library('rpart')
+library('rpart.plot')
+library('caTools')
+library('caret')
+library('e1071')
+library('randomForest')
+```
+
+
+```{r echo=FALSE, results = 'hide'}
+# Define multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+```{r echo=FALSE, results = 'hide'}
+# function to extract binomial confidence levels
+get_binCI <- function(x,n) as.list(setNames(binom.test(x,n)$conf.int, c("lwr", "upr")))
+```
+
+# Data Preprocessing # 
+
+## Loading Data ##
+```{r echo= TRUE, warning=FALSE}
+air_visits <- read.csv('air_visit_data.csv')
+air_reserve <- read.csv('air_reserve.csv')
+hpg_reserve <- read.csv('hpg_reserve.csv')
+air_store <- read.csv('air_store_info.csv')
+hpg_store <- read.csv('hpg_store_info.csv')
+holidays <- read.csv('date_info.csv')
+store_ids <- read.csv('store_id_relation.csv')
+```
+
+## Summary of air visitor data ##
+```{r echo=FALSE, warning=FALSE}
+summary(air_visits)
+glimpse(air_visits)
+```
+
+Number of unique *air* restaurants: `r air_visits %>% distinct(air_store_id) %>% nrow()`
+
+Mean number of visitors/day in *air* restaurants: `r mean(air_visits$visitors)`
+
+```{r warning = FALSE}
+# Data formatting #
+air_visits <- air_visits %>%
+  mutate(visit_date = ymd(visit_date))
+
+air_reserve <- air_reserve %>%
+  mutate(visit_date = ymd(visit_datetime),
+         reserve_date = ymd_hms(reserve_datetime))
+
+hpg_reserve <- hpg_reserve %>%
+  mutate(visit_datetime = ymd_hms(visit_datetime),
+         reserve_datetime = ymd_hms(reserve_datetime))
+
+air_store <- air_store %>%
+  mutate(air_genre_name = as.factor(air_genre_name),
+         air_area_name = as.factor(air_area_name))
+
+hpg_store <- hpg_store %>%
+  mutate(hpg_genre_name = as.factor(hpg_genre_name),
+         hpg_area_name = as.factor(hpg_area_name))
+
+holidays <- holidays %>%
+  mutate(holiday_flg = as.logical(holiday_flg),
+         date = ymd(calendar_date))
+
+holidays1 <- holidays %>%
+  filter(holiday_flg == TRUE)
+```
+
+
+# Data Visualization # 
+
+## Visitor Time Series ## 
+We can start by first looking at the visitor data in terms of overall daily visitor count, daily visitor distribution, monthly distribution, and daily distribution. . 
+```{r split=FALSE, fig.align = 'default', echo=FALSE, warning=FALSE, fig.cap ="Air Restaurants Visitor Information", out.width="100%"}
+p1 <- air_visits %>%
+  group_by(visit_date) %>%
+  summarise(total_visits = sum(visitors)) %>%
+  ggplot(aes(visit_date,total_visits)) +
+  geom_line(col = "midnightblue") +
+  geom_vline(data = holidays1, aes(xintercept = date), alpha = 0.4) + 
+  scale_x_date(date_breaks = "3 month") + 
+  labs(y = "Total visits", title = "Total visits per day (with holidays)")
+
+p2 <- air_visits %>%
+  ggplot(aes(visitors)) +
+  geom_vline(xintercept = 20, color = "yellow") +
+  geom_histogram(fill = "midnightblue", bins = 30) +
+  scale_x_log10() + 
+  labs(title = "Daily visitor distribution")
+
+p3 <- air_visits %>%
+  mutate(wday = wday(visit_date, label = TRUE)) %>%
+  group_by(wday) %>%
+  summarise(visits = median(visitors)) %>%
+  ggplot(aes(wday, visits, fill = wday)) +
+  geom_col() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "Day of the week", y = "Median visitors", title = "Visitors in a week")
+
+p4 <- air_visits %>%
+  mutate(month = month(visit_date, label = TRUE)) %>%
+  group_by(month) %>%
+  summarise(visits = median(visitors)) %>%
+  ggplot(aes(month, visits, fill = month)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  labs(x = "Month", y = "Median visitors", title = "Visitors in a year")
+
+layout <- matrix(c(1,1,1,1,2,2,2,2,3,3,4,4),3,4,byrow=TRUE)
+multiplot(p1, p2, p3, p4, layout=layout)
+```
+From the figures above, we can make the following observations: 
+
+- Daily number of visitors assumes a lognormal distribution, which is good for linear regression methods (requiring a simple transformation of log(n)).
+
+- There seem to be a huge spike in aggregate visitor count on July 2016, which we assume to be due to an update in the air website database to include more restaurants. 
+
+- There is a large drop in aggretate visitor count at the start of 2017, so perhaps there are some missing data in the data set. We will explore in the later section if it affects our prediction accuracy. 
+
+- The visitor count is higher on Fridays, Saturdays and Sundays, which is not surprising for the F&B industry. 
+
+- There seem to be a drop in visitor count from July till November, before reaching a peak in December. We can hypothesize that it has something to do with the weather conditions, or simply due to the addition of smaller stores into the website database.  
+
+Now, let's look at the forecast period (22nd March to 22nd April) in 2016 to see if we have any anomolies in the data. 
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="22 Mar - 22 Apr Visitor Data", fig.height = 3.5, out.width="100%"}
+air_visits %>%
+  filter(visit_date > ymd("2016-03-22") & visit_date < ymd("2016-04-22")) %>%
+  group_by(visit_date) %>%
+  summarise(all_visitors = sum(visitors)) %>%
+  ggplot(aes(visit_date,all_visitors)) +
+  geom_point(color = "maroon") +
+  geom_smooth(method = "loess", color = "midnightblue", span = 0.2) +
+  labs(y = "All visitors", x = "Date")
+```
+Here, we see that the actual data (red dots) is quite well behaved with a regular cyclical trend(blue line) and a slight decreasing trend. 
+
+## Restaurant Overview ##
+We can first look at the restaurant count split by genre and area to see if the data set is skewed towards a particular catagory. 
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap =" Number of air restaurants by cuisine genre", out.width="100%", fig.height = 3}
+p1 <- air_store %>%
+  group_by(air_genre_name) %>%
+  count() %>%
+  ggplot(aes(reorder(air_genre_name, n, FUN = min), n, fill = air_genre_name)) +
+  geom_col() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_fill_viridis(discrete = 'TRUE', option = "D") +
+  labs(x = "Type of cuisine", y = "Number of air restaurants")
+
+p1
+```
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap =" Number of air restaurants by area", out.width="70%", fig.height = 3}
+p2 <- air_store %>%
+  group_by(air_area_name) %>%
+  count() %>%
+  ungroup() %>%
+  top_n(15,n) %>%
+  ggplot(aes(reorder(air_area_name, n, FUN = min) ,n, fill = air_area_name)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  scale_fill_viridis(discrete = 'TRUE', option = "magma") +
+  coord_flip() +
+  theme(legend.position = "none", axis.text.y  = element_text(angle=0, hjust=1)) +
+  labs(x = "Top 15 areas", y = "Number of air restaurants")
+
+p2
+```
+
+
+From the figures above, we can make the following observations:
+
+- Izakaya and Cafe seems to be the two most popular restaurants in Japan, followed by dining bar, Italian/French and Japanese food(assuming no selection bias on AirREGI website).  
+
+- Most of the *air* restaurants are located in the Tokyo prefecture, followed by Fukuoka, Osaka, Hiroshima and Hokkaido. 
+
+
+# Time-Series Forecasting # 
+
+Now let's get our hands dirty and do some forecasting. Our general methodology will be as such: 
+ 
+ 1) Decompose date column into useful date-time features. You can see these features like individual variables.
+ 
+ 2) Extract additional useful features such as holidays, average historical visits, and number of reservations. 
+ 
+ 3) Standard regression/classification methods for daily visitor prediction
+ 
+ 4) Select a few store IDs for validation test. We selected *air_id = "air_ba937bf13d40fb24"*, *air_id = "air_07bb665f9cdfbdfb"* and *air_id = air_1c0b150f9e696a5f"* to demonstrate the effectiveness of our model under different scenarios. 
+ 
+## Feature Engineering ##
+Given that we are dealing with time series data, we broke down the date column into day of the week, week of the month, and month of the year, so that we can do prediction using standard linear regression. In addition, we created two new features: 
+
+1. **vis_mean_dow** - mean no. of visitors to the restaurant on that particular day of the week
+    
+2. **res_for_date** - no. of reservation scheduled
+    
+
+```{r include=FALSE}
+air_visit_data = read.csv('air_visit_data.csv')
+air_visit_data$visit_date <- as.Date(air_visit_data$visit_date)
+date_info = read.csv('date_info.csv')
+date_info$calendar_date <- as.Date(date_info$calendar_date)
+air_visit_data$dow <- as.POSIXlt(air_visit_data$visit_date)$wday
+air_visit_data$month <- strtoi(strftime(air_visit_data$visit_date,"%m"), base = 0L)
+air_visit_data$woy <- strtoi(strftime(air_visit_data$visit_date,"%V"), base = 0L)
+kable(head(air_visit_data,3))
+```
+    
+```{r}
+visitor_stats <- air_visit_data %>%
+                 group_by(air_store_id, dow) %>%
+                 summarise(vis_mean_dow = mean(visitors))
+
+reserve_stats <- air_reserve %>%
+                 group_by(air_store_id, visit_date) %>%
+                 summarise(res_for_date = sum(reserve_visitors))
+```
+
+```{r, include=FALSE}
+# Add newly constructed air_visit_data features to air_visit_data
+air_visit_data = merge(x=air_visit_data, y=visitor_stats, by=c("air_store_id","dow"), all.x=TRUE)
+air_visit_data = merge(x=air_visit_data, y=reserve_stats, by=c("air_store_id","visit_date"), all.x=TRUE)
+air_visit_data[is.na(air_visit_data)] <- 0
+kable(head(air_visit_data,3))
+```
+
+
+```{r include=TRUE, out.width="100%", fig.align = 'default'}
+#All the engineered features will be compiled with the given features to create our training and validation sets.   
+#Data types are modified as necessary.  
+#Final features: visit_date, air_store_id, dow, visitors, month, woy, vis_mean_dow, res_for_date, holiday_flg
+air_compiled = merge(x=air_visit_data, y=date_info[,c(1,3)], by.x='visit_date', by.y='calendar_date', all.x=TRUE)
+air_compiled$holiday_flg <- as.factor(air_compiled$holiday_flg)
+kable(head(air_compiled,3))
+```
+
+## Linear Regression & Classification Trees ## 
+
+### Case 1: store ***air_ba937bf13d40fb24*** ###
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, out.width="100%", fig.height=3}
+store = "air_ba937bf13d40fb24"
+train = air_compiled[(air_compiled$visit_date<'2017-03-22') & (air_compiled$air_store_id==store),]
+valid = air_compiled[(air_compiled$visit_date>='2017-03-22') & (air_compiled$air_store_id==store),]
+fit_lm <- lm(visitors ~ ., data = select(train, -c(air_store_id)))
+fit_class <- rpart(visitors ~ ., data = select(train, -c(air_store_id)), method = "class", control = rpart.control(cp = 0.001))
+fit_forest <- randomForest(visitors ~ ., data = select(train, -c(air_store_id)), ntree = 200, nodesize = 10)
+
+# Predict and plot
+pred <- predict(fit_lm, newdata = select(valid, -c(visitors, air_store_id)))
+pred2 <- predict(fit_class, newdata = select(valid, -c(visitors, air_store_id)), type="class")
+pred3 <- predict(fit_forest, newdata = select(valid, -c(visitors, air_store_id)))
+valid$predicted_visitors <- pred3
+plotted <-valid %>%
+          ggplot() + 
+          geom_point(aes(x = visit_date, y = visitors),colour="maroon") + 
+          geom_line(aes(x = visit_date, y = predicted_visitors),colour="midnightblue") + 
+          guides(color = guide_legend(reverse = TRUE)) +
+          labs(x = "Date", y = "visitor")
+plotted
+```
+
+- Mean Absolute Error: `r sum(abs(valid$predicted_visitors - valid$visitors))/nrow(valid)`
+
+- Average predicted daily visitors: `r sum(valid$predicted_visitors)/nrow(valid)`
+
+- Average actual daily visitors: `r sum(valid$visitors)/nrow(valid)`
+
+In this case, we can see that time series forecasting of daily visitors is reasonably accurate for store owners to plan for supplies, especially for F&B stores with prerishable raw materials. 
+
+### Case 2: store ***air_07bb665f9cdfbdfb*** ###
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, out.width="100%", fig.height=3}
+store = "air_07bb665f9cdfbdfb"
+train = air_compiled[(air_compiled$visit_date<'2017-03-22') & (air_compiled$air_store_id==store),]
+valid = air_compiled[(air_compiled$visit_date>='2017-03-22') & (air_compiled$air_store_id==store),]
+
+fit_lm <- lm(visitors ~ ., data = select(train, -c(air_store_id)))
+fit_class <- rpart(visitors ~ ., data = select(train, -c(air_store_id)), method = "class", control = rpart.control(cp = 0.001))
+fit_forest <- randomForest(visitors ~ ., data = select(train, -c(air_store_id)), ntree = 200, nodesize = 10)
+
+# Predict and plot
+pred <- predict(fit_lm, newdata = select(valid, -c(visitors, air_store_id)))
+pred2 <- predict(fit_class, newdata = select(valid, -c(visitors, air_store_id)), type="class")
+pred3 <- predict(fit_forest, newdata = select(valid, -c(visitors, air_store_id)))
+valid$predicted_visitors <- pred3
+plotted <- ggplot(valid) + 
+  geom_point(aes(x = visit_date, y = visitors),colour="maroon") + 
+  geom_line(aes(x = visit_date, y = predicted_visitors),colour="midnightblue") + 
+  labs(x = "Date", y = "visitor")
+plotted
+```
+
+- Mean Absolute Error: `r sum(abs(valid$predicted_visitors - valid$visitors))/nrow(valid)`
+
+- Average predicted daily visitors: `r sum(valid$predicted_visitors)/nrow(valid)`
+
+- Average actual daily visitors: `r sum(valid$visitors)/nrow(valid)`
+
+We can see that while the overall trend is reasonably accurate, the forecasted values poorly accounts for anomalies. In cases like these, it would be advisable to exercise sound business judgement to preempt days with sudden surge in visitor count. 
+
+### Case 3: store **air_1c0b150f9e696a5f** ###
+    
+```{r split=FALSE, fig.align = 'default', warning = FALSE, out.width="100%", fig.height=3}
+store = "air_1c0b150f9e696a5f"
+train = air_compiled[(air_compiled$visit_date<'2017-03-22') & (air_compiled$air_store_id==store),]
+valid = air_compiled[(air_compiled$visit_date>='2017-03-22') & (air_compiled$air_store_id==store),]
+
+# Fit the training data to a linear model
+fit_lm <- lm(visitors ~ ., data = select(train, -c(air_store_id)))
+fit_class <- rpart(visitors ~ ., data = select(train, -c(air_store_id)), method = "class", control = rpart.control(cp = 0.001))
+fit_forest <- randomForest(visitors ~ ., data = select(train, -c(air_store_id)), ntree = 200, nodesize = 10)
+
+# Predict and plot
+pred <- predict(fit_lm, newdata = select(valid, -c(visitors, air_store_id)))
+pred2 <- predict(fit_class, newdata = select(valid, -c(visitors, air_store_id)), type="class")
+pred3 <- predict(fit_forest, newdata = select(valid, -c(visitors, air_store_id)))
+valid$predicted_visitors <- pred
+train$predicted_visitors <- NA
+binded <- rbind(valid,train)
+pred_plot <- ggplot(binded) + 
+  geom_line(aes(x = visit_date, y = visitors),colour="maroon",linetype="longdash") + 
+  geom_line(aes(x = visit_date, y = predicted_visitors),colour="midnightblue") + 
+  labs(x = "Date", y = "visitor")
+pred_plot
+```
+
+- Mean Absolute Error: `r sum(abs(valid$predicted_visitors - valid$visitors))/nrow(valid)`
+
+- Average predicted daily visitors: `r sum(valid$predicted_visitors)/nrow(valid)`
+
+- Average actual daily visitors: `r sum(valid$visitors)/nrow(valid)`
+
+In this case, while the general peaks and troughs appear to be accurate, our model failed to account for the overall decreasing trend. Upon further inspection it appears that this is because the earliests recorded visit date is 2017-03-02, merely a month before the dates that we are forecasting. This could be due to the restaurant being new in the system, thus the model failed to capture a trends that could have been caught with more data. Alternatively, it could also be due to the restaurant being recently opened, such that the increasing trend in visitors in the first month was due to initial interest in the new restaurant. Our model then captured and wrongly extrapolated the trend, as the initial interest began to wane as time passes.
+
+## Technical Remark ## 
+Based on the cases presented above, we can see that while general prediction methods work well for stores with stable seasonality and trend factors, they are nonetheless inadequate for unique cases like case 2 & 3. This small exercise aptly ellucidates the importance of well-engineered features, which have tremendous impact on the predictive power of a model. 
+
+# Heuristic Guidelines#
+
+## Supply Planning ## 
+From the cases above, we can see that while time series forecasting works very well for stores with stable trend and seasonality, they fit worse for stores with very high variance. Nevertheless, for stores with visitor data similar to case 1, time series forecasting is a very useful tool to better manage store supplies, especially in the F&B industry where a large portion of raw ingredients are perishables. 
+
+## Staff Scheduling ## 
+When it comes to staff scheduling, a key factor to analyze on top of visitor data would be worker productivity. Assuming that worker productivity is homogeneous across all stores, we can make good decisions based on the results shared in this report. However, to truly optimize the number of part time and full time workers to hire for the entire year, we would recommend the decision makers to also consider the average work rate of their workers to achieve better service levels and customer experience. 
+
+
+# Model Limitations and Future Plans # 
+
+## Diagnostic & Prescriptive Analytics ## 
+In this report, our analysis has been restricted mostly to data visualization (**Descriptive Analytics**) and forecasting (**Predictive Analytics**), with some preliminary discussion on decision making. However, to fully uncover the potential of analytics, there remain much work to be done in terms of validifying hypothesis(**Disgonistic Analytics**) and providing actionable recommendations(**Prescriptive Analytics**). With this in mind, we highly encourage further exploration and analysis through refining problem statements, collecting more quality data, and running randomized controlled trials (RCTs) to gain a deeper understanding of the F&B industry in Japan and the critical success factors required to run a fully automated and optimized Operations Model. 
+
+## Alternative Time-Series Forecasting Methods ##
+Note that our method for analysing time-series/panel data isn't the most sophisticated as we are essentially pooling the data to do analysis, ignoring factors like time lags(autocorrelation), heterogeneity, endogeneity and other issues related to time-series and panel data. Hence, we have list out some tools that we would like to explore in the future as our knowledge of data science and analytics grow. 
+
+- **ARIMA**: Known as "Auto-Regressive Integrated Moving Average" Model, ARIMA addresses some of the inherent problems with time series data by including a set of parameters (p,d,q), which accounts for the autocorrelation and non-stationarity within a time series data set. To further account for seasonality factors, Seasonal ARIMA (SARIMA) can be used instead to increase model fit. 
+
+- **Prophet**: Prophet is a forecasting model designed to deal with multiple seasonalities, developed by Facebook's core Data Science team. The model assumes that the time series data can be decomposed into trend factor, seasonality factor and holiday factor. THe model fitting is framed as a curve-fitting exercise, so it does not explicitly take into account for temporal dependence structure in the data. 
+
+In this project, we think that Prophet would work quite well, given that there are clear seasonality and holiday factors within the data (hence non-stationary). 
+
+## Additional Features ##
+We would also like to note some features that we can include into our model to increase its predictive power. 
+
+- **Transportation Data** - We hypothesize that restaurants nearer to public modes of transportation (buses & trains) will be more assessible and therefore have more daily visitors. We believe that analysing the marginal effect of such variables will be useful for restaurants seeking to open new chains and would like to assess the relative benefits between two locations. 
+
+- **Similarity Index** - We hypothesize that restaurants with similar cuisines (e.g. Singaporean & Malaysian cuisine) would have lower average daily visitor count due to the substitution effect. It would be interesting to proof or disproof this hypothesis as it then allows aspiring entrepreneurs to make better decisions on whether to open their store nearer or further away from restaurants with similar offerings. 
+
+- **Area "Crowdedness"** - We hypothesize that there is a correlation between the density of restaurants within an area(*q*) and the average daily number of customers(*n*), assuming that other confounding factors like food quality, cuisine genre, assessibility etc. are kept constant. We think that such an analysis would definitely benefit aspiring entrepreneurs who want to make a decision on where to open a store, balancing the tradeoff between high traffic and high competition(also high fixed cost). 
+
+- **Weather Forecast** - We hypothesize that extreme weather conditions are likely to impede people from visiting restaurants(instead opting for home-cook meal). Hence, we think that adding quality weather data as additional features will boost our time series prediction model in a meaningful way. 
+
+# Credit # 
+Lastly, we would like to credit the following sources for inspiring our research methods in this report: 
+
+- [Be My Guest - Recruit Restaurant EDA](https://www.kaggle.com/headsortails/be-my-guest-recruit-restaurant-eda/report#forecasting-methods-and-examples) by Heads or Tails
+
+- [A Very Extensive Recruit Exploratory Analysis](https://www.kaggle.com/captcalculator/a-very-extensive-recruit-exploratory-analysis/code) by Troy Walters
+
+
